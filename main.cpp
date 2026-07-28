@@ -82,14 +82,14 @@ uint8_t current_volume = 150; // ES8311 volume state
 // --- I2C FUNCTIONS ---
 
 esp_err_t i2c_master_init() {
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = I2C_MASTER_SDA_IO,
-        .scl_io_num = I2C_MASTER_SCL_IO,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master = { .clk_speed = I2C_MASTER_FREQ_HZ }
-    };
+    i2c_config_t conf = {};
+    conf.mode = I2C_MODE_MASTER;
+    conf.sda_io_num = (gpio_num_t)I2C_MASTER_SDA_IO;
+    conf.scl_io_num = (gpio_num_t)I2C_MASTER_SCL_IO;
+    conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
+    conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
+    conf.master.clk_speed = I2C_MASTER_FREQ_HZ;
+
     i2c_param_config(I2C_MASTER_NUM, &conf);
     return i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0);
 }
@@ -225,19 +225,17 @@ uint8_t leds_g[LED_COUNT] = {0};
 uint8_t leds_b[LED_COUNT] = {0};
 
 void ws2812_init() {
-    rmt_config_t config = {
-        .rmt_mode = RMT_MODE_TX,
-        .channel = RMT_TX_CHANNEL,
-        .gpio_num = LED_PIN,
-        .clk_div = 2, // 40MHz, 1 tick = 25ns
-        .mem_block_num = 1,
-        .tx_config = {
-            .loop_en = false,
-            .carrier_en = false,
-            .idle_output_en = true,
-            .idle_level = RMT_IDLE_LEVEL_LOW,
-        }
-    };
+    rmt_config_t config = {};
+    config.rmt_mode = RMT_MODE_TX;
+    config.channel = RMT_TX_CHANNEL;
+    config.gpio_num = (gpio_num_t)LED_PIN;
+    config.clk_div = 2; // 40MHz, 1 tick = 25ns
+    config.mem_block_num = 1;
+    config.tx_config.loop_en = false;
+    config.tx_config.carrier_en = false;
+    config.tx_config.idle_output_en = true;
+    config.tx_config.idle_level = RMT_IDLE_LEVEL_LOW;
+
     rmt_config(&config);
     rmt_driver_install(config.channel, 0, 0);
 }
@@ -258,9 +256,17 @@ void ws2812_update() {
         uint32_t color = (leds_g[i] << 16) | (leds_r[i] << 8) | leds_b[i];
         for (int b = 23; b >= 0; b--) {
             if (color & (1 << b)) {
-                items[item_idx++] = {{{ t1h, 1, t1l, 0 }}};
+                items[item_idx].duration0 = t1h;
+                items[item_idx].level0 = 1;
+                items[item_idx].duration1 = t1l;
+                items[item_idx].level1 = 0;
+                item_idx++;
             } else {
-                items[item_idx++] = {{{ t0h, 1, t0l, 0 }}};
+                items[item_idx].duration0 = t0h;
+                items[item_idx].level0 = 1;
+                items[item_idx].duration1 = t0l;
+                items[item_idx].level1 = 0;
+                item_idx++;
             }
         }
     }
@@ -284,26 +290,24 @@ void leds_clear() {
 // --- I2S FUNCTIONS ---
 
 void i2s_init_driver() {
-    i2s_config_t i2s_config = {
-        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX),
-        .sample_rate = AUDIO_SAMPLE_RATE,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 8,
-        .dma_buf_len = 1024,
-        .use_apll = false,
-        .tx_desc_auto_clear = true
-    };
+    i2s_config_t i2s_config = {};
+    i2s_config.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX);
+    i2s_config.sample_rate = AUDIO_SAMPLE_RATE;
+    i2s_config.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+    i2s_config.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
+    i2s_config.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+    i2s_config.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+    i2s_config.dma_buf_count = 8;
+    i2s_config.dma_buf_len = 1024;
+    i2s_config.use_apll = false;
+    i2s_config.tx_desc_auto_clear = true;
 
-    i2s_pin_config_t pin_config = {
-        .mck_io_num = I2S_MCK_IO,
-        .bck_io_num = I2S_BCK_IO,
-        .ws_io_num = I2S_WS_IO,
-        .data_out_num = I2S_DO_IO,
-        .data_in_num = I2S_DI_IO
-    };
+    i2s_pin_config_t pin_config = {};
+    pin_config.mck_io_num = (gpio_num_t)I2S_MCK_IO;
+    pin_config.bck_io_num = (gpio_num_t)I2S_BCK_IO;
+    pin_config.ws_io_num = (gpio_num_t)I2S_WS_IO;
+    pin_config.data_out_num = (gpio_num_t)I2S_DO_IO;
+    pin_config.data_in_num = (gpio_num_t)I2S_DI_IO;
 
     i2s_driver_install(I2S_PORT_NUM, &i2s_config, 0, NULL);
     i2s_set_pin(I2S_PORT_NUM, &pin_config);
@@ -531,7 +535,7 @@ void ui_task(void *pvParameters) {
 
 // --- MAIN APPLICATION ---
 
-extern "C" void app_main() {
+extern "C" void app_main(void) {
     ESP_LOGI(TAG, "Audio Jammer PoC Booting...");
 
     // 1. Allocate PSRAM Buffer
