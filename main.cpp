@@ -141,22 +141,35 @@ void tca9555_init() {
     // Port 1 Config Register (0x07)
     // 0 = Output, 1 = Input
     // PA_EN (Bit 0) = Output (0), KEY1-3 (Bits 1-3) = Input (1)
-    uint8_t config;
-    i2c_read_reg(TCA9555_ADDR, 0x07, &config);
+    uint8_t config = 0;
+    esp_err_t err = i2c_read_reg(TCA9555_ADDR, 0x07, &config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read TCA9555 config. Device missing or I2C bus error?");
+        return; // Early return to prevent writing bad config
+    }
+
     config &= ~TCA_PIN_PA_EN;      // Set PA_EN as output
     config |= (TCA_PIN_KEY1 | TCA_PIN_KEY2 | TCA_PIN_KEY3); // Set keys as inputs
-    i2c_write_reg(TCA9555_ADDR, 0x07, config);
+    err = i2c_write_reg(TCA9555_ADDR, 0x07, config);
+    if (err != ESP_OK) ESP_LOGE(TAG, "Failed to write TCA9555 config!");
 
     // Initial state: PA_EN off
-    uint8_t out_state;
-    i2c_read_reg(TCA9555_ADDR, 0x03, &out_state);
-    out_state &= ~TCA_PIN_PA_EN;
-    i2c_write_reg(TCA9555_ADDR, 0x03, out_state);
+    uint8_t out_state = 0;
+    err = i2c_read_reg(TCA9555_ADDR, 0x03, &out_state);
+    if (err == ESP_OK) {
+        out_state &= ~TCA_PIN_PA_EN;
+        i2c_write_reg(TCA9555_ADDR, 0x03, out_state);
+    }
 }
 
 void tca9555_set_pa(bool enable) {
-    uint8_t out_state;
-    i2c_read_reg(TCA9555_ADDR, 0x03, &out_state);
+    uint8_t out_state = 0;
+    esp_err_t err = i2c_read_reg(TCA9555_ADDR, 0x03, &out_state);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "I2C read failed on TCA9555 (set_pa)");
+        return;
+    }
+
     if (enable) {
         out_state |= TCA_PIN_PA_EN;
     } else {
@@ -166,8 +179,12 @@ void tca9555_set_pa(bool enable) {
 }
 
 uint8_t tca9555_read_port1() {
-    uint8_t in_state = 0;
-    i2c_read_reg(TCA9555_ADDR, 0x01, &in_state);
+    uint8_t in_state = 0xFF; // Default to all buttons released
+    esp_err_t err = i2c_read_reg(TCA9555_ADDR, 0x01, &in_state);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "I2C read failed on TCA9555");
+        return 0xFF;
+    }
     return in_state;
 }
 
@@ -176,40 +193,50 @@ uint8_t tca9555_read_port1() {
 void codec_init() {
     ESP_LOGI(TAG, "Initializing ES8311 DAC and ES7210 ADC via I2C...");
 
-    // ES8311 DAC Init (Playback)
-    // Basic setup for 16kHz, 16-bit, I2S Slave
-    i2c_write_reg(ES8311_ADDR, 0x00, 0x1F); // Reset
-    vTaskDelay(pdMS_TO_TICKS(10));
-    i2c_write_reg(ES8311_ADDR, 0x00, 0x00);
+    // Check if DAC is responding
+    esp_err_t err = i2c_write_reg(ES8311_ADDR, 0x00, 0x1F); // Reset
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "ES8311 DAC not responding on I2C!");
+    } else {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        i2c_write_reg(ES8311_ADDR, 0x00, 0x00);
 
-    i2c_write_reg(ES8311_ADDR, 0x01, 0x3F); // Clock Manager
-    i2c_write_reg(ES8311_ADDR, 0x02, 0x00); // MCLK / Sample rate sync
-    i2c_write_reg(ES8311_ADDR, 0x09, 0x0C); // I2S RX Data Format (16-bit, standard I2S)
-    i2c_write_reg(ES8311_ADDR, 0x0D, 0x01); // Power Up Analog
-    i2c_write_reg(ES8311_ADDR, 0x0E, 0x02); // Enable DAC
-    i2c_write_reg(ES8311_ADDR, 0x12, 0x00); // Route DAC to Output
-    i2c_write_reg(ES8311_ADDR, 0x14, 0x24); // Output mixer
-    i2c_write_reg(ES8311_ADDR, 0x32, current_volume); // Initial DAC digital volume
+        i2c_write_reg(ES8311_ADDR, 0x01, 0x3F); // Clock Manager
+        i2c_write_reg(ES8311_ADDR, 0x02, 0x00); // MCLK / Sample rate sync
+        i2c_write_reg(ES8311_ADDR, 0x09, 0x0C); // I2S RX Data Format (16-bit, standard I2S)
+        i2c_write_reg(ES8311_ADDR, 0x0D, 0x01); // Power Up Analog
+        i2c_write_reg(ES8311_ADDR, 0x0E, 0x02); // Enable DAC
+        i2c_write_reg(ES8311_ADDR, 0x12, 0x00); // Route DAC to Output
+        i2c_write_reg(ES8311_ADDR, 0x14, 0x24); // Output mixer
+        i2c_write_reg(ES8311_ADDR, 0x32, current_volume); // Initial DAC digital volume
+    }
 
-    // ES7210 ADC Init (Recording)
-    // Basic setup for 16kHz, 16-bit, I2S Slave
-    i2c_write_reg(ES7210_ADDR, 0x00, 0xFF); // Reset registers
-    vTaskDelay(pdMS_TO_TICKS(10));
-    i2c_write_reg(ES7210_ADDR, 0x00, 0x00); // Exit Reset
+    // Check if ADC is responding
+    err = i2c_write_reg(ES7210_ADDR, 0x00, 0xFF); // Reset registers
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "ES7210 ADC not responding on I2C!");
+    } else {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        i2c_write_reg(ES7210_ADDR, 0x00, 0x00); // Exit Reset
 
-    i2c_write_reg(ES7210_ADDR, 0x01, 0x3A); // System clock
-    i2c_write_reg(ES7210_ADDR, 0x02, 0x00); // MCLK source
-    i2c_write_reg(ES7210_ADDR, 0x04, 0x03); // Mic channel config
-    i2c_write_reg(ES7210_ADDR, 0x05, 0x00); // MCLK multiplier
-    i2c_write_reg(ES7210_ADDR, 0x0B, 0x00); // I2S Data Format (16-bit, standard I2S)
-    i2c_write_reg(ES7210_ADDR, 0x41, 0x20); // MIC PGA gain
-    i2c_write_reg(ES7210_ADDR, 0x43, 0x00); // Enable ADC
+        i2c_write_reg(ES7210_ADDR, 0x01, 0x3A); // System clock
+        i2c_write_reg(ES7210_ADDR, 0x02, 0x00); // MCLK source
+        i2c_write_reg(ES7210_ADDR, 0x04, 0x03); // Mic channel config
+        i2c_write_reg(ES7210_ADDR, 0x05, 0x00); // MCLK multiplier
+        i2c_write_reg(ES7210_ADDR, 0x0B, 0x00); // I2S Data Format (16-bit, standard I2S)
+        i2c_write_reg(ES7210_ADDR, 0x41, 0x20); // MIC PGA gain
+        i2c_write_reg(ES7210_ADDR, 0x43, 0x00); // Enable ADC
+    }
 }
 
 void es8311_set_volume(uint8_t vol) {
     current_volume = vol;
-    i2c_write_reg(ES8311_ADDR, 0x32, current_volume);
-    ESP_LOGI(TAG, "ES8311 Volume set to: %d", current_volume);
+    esp_err_t err = i2c_write_reg(ES8311_ADDR, 0x32, current_volume);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set volume. ES8311 not responding.");
+    } else {
+        ESP_LOGI(TAG, "ES8311 Volume set to: %d", current_volume);
+    }
 }
 
 // --- WS2812 LED FUNCTIONS (RMT) ---
