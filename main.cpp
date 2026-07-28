@@ -53,8 +53,10 @@ static const char *TAG = "AUDIO_JAMMER";
 
 // Audio & DSP Configuration
 #define AUDIO_SAMPLE_RATE           16000
-#define MAX_RECORD_SECONDS          20
-#define BUFFER_SIZE_BYTES           (AUDIO_SAMPLE_RATE * 2 * MAX_RECORD_SECONDS) // 16kHz * 16-bit (2B) * 20s = 640kB
+
+// We now use dynamic buffer size based on allocation success.
+#define PSRAM_RECORD_SECONDS        20
+#define INTERNAL_RECORD_SECONDS     5
 
 #define CHUNK_MS                    250
 #define CHUNK_SAMPLES               (AUDIO_SAMPLE_RATE * CHUNK_MS / 1000) // 4000 samples
@@ -75,6 +77,8 @@ volatile SystemState current_state = STATE_IDLE;
 
 // --- GLOBAL VARIABLES ---
 int16_t *audio_buffer = NULL;
+uint32_t actual_buffer_size_bytes = 0;
+
 volatile uint32_t audio_buffer_len = 0; // Number of samples currently recorded
 volatile uint32_t current_rms = 0;
 uint8_t current_volume = 150; // ES8311 volume state
@@ -268,7 +272,7 @@ void ws2812_init() {
 }
 
 void ws2812_update() {
-    // 24 bits per LED (G, R, B)
+    // 24 bits per LED (R, G, B for this specific board variant)
     size_t num_items = LED_COUNT * 24;
     rmt_item32_t *items = (rmt_item32_t *)malloc(num_items * sizeof(rmt_item32_t));
     if(!items) return;
@@ -280,7 +284,8 @@ void ws2812_update() {
 
     size_t item_idx = 0;
     for (int i = 0; i < LED_COUNT; i++) {
-        uint32_t color = (leds_g[i] << 16) | (leds_r[i] << 8) | leds_b[i];
+        // Updated color mapping to RGB instead of GRB
+        uint32_t color = (leds_r[i] << 16) | (leds_g[i] << 8) | leds_b[i];
         for (int b = 23; b >= 0; b--) {
             if (color & (1 << b)) {
                 items[item_idx].duration0 = t1h;
@@ -404,8 +409,8 @@ void audio_task(void *pvParameters) {
 
             // VAD (Noise Gate)
             if (rms > NOISE_GATE_THRESHOLD) {
-                // Check if buffer has space
-                if (audio_buffer_len + samples_read <= (BUFFER_SIZE_BYTES / 2)) {
+                // Check if buffer has space using dynamic actual_buffer_size_bytes
+                if (audio_buffer_len + samples_read <= (actual_buffer_size_bytes / 2)) {
                     memcpy(&audio_buffer[audio_buffer_len], chunk_buffer, bytes_read);
                     audio_buffer_len += samples_read;
                 } else {
@@ -478,7 +483,7 @@ void ui_task(void *pvParameters) {
                 // Enter Recording
                 ESP_LOGI(TAG, "State -> RECORDING");
                 audio_buffer_len = 0; // Reset buffer pointer
-                memset(audio_buffer, 0, BUFFER_SIZE_BYTES); // Clear PSRAM
+                memset(audio_buffer, 0, actual_buffer_size_bytes); // Clear allocated RAM
                 current_state = STATE_RECORDING;
             }
         }
@@ -493,7 +498,6 @@ void ui_task(void *pvParameters) {
                 current_state = STATE_IDLE;
             } else if (hold_time <= 500) {
                 // Short click
-                // Code Review Fix: Make exiting JAMMING possible even with a long click, but standard toggle is better.
                 if (current_state == STATE_IDLE) {
                     if (audio_buffer_len > CHUNK_SAMPLES) {
                         ESP_LOGI(TAG, "State -> JAMMING");
@@ -510,8 +514,8 @@ void ui_task(void *pvParameters) {
             }
         }
 
-        // Auto-stop recording if buffer full
-        if (current_state == STATE_RECORDING && audio_buffer_len >= (BUFFER_SIZE_BYTES / 2)) {
+        // Auto-stop recording if buffer full based on dynamic actual_buffer_size_bytes
+        if (current_state == STATE_RECORDING && audio_buffer_len >= (actual_buffer_size_bytes / 2)) {
             ESP_LOGI(TAG, "State -> IDLE (Buffer Full)");
             current_state = STATE_IDLE;
         }
@@ -530,7 +534,7 @@ void ui_task(void *pvParameters) {
         if (!key3_pressed) key3_was_pressed = false;
 
         // --- LED Updates ---
-        leds_set_all(0, 0, 0); // Code review fix: leds_set_all doesn't call ws2812_update anymore
+        leds_set_all(0, 0, 0);
         if (current_state == STATE_IDLE) {
             leds_r[0] = 0; leds_g[0] = 0; leds_b[0] = 50; // Blue
         } else if (current_state == STATE_JAMMING) {
@@ -567,7 +571,7 @@ void ui_task(void *pvParameters) {
 extern "C" void app_main(void) {
     ESP_LOGI(TAG, "Audio Jammer PoC Booting...");
 
-    // 1. Hardware Init (Reordered to run before PSRAM to allow Visual Debugging)
+    // 1. Hardware Init (Reordered to run before RAM to allow Visual Debugging)
     ws2812_init();
 
     // Visual Debugging: Booting (Yellow)
@@ -581,25 +585,40 @@ extern "C" void app_main(void) {
     codec_init();
     i2s_init_driver();
 
-    // 2. Allocate PSRAM Buffer
-    audio_buffer = (int16_t *)heap_caps_malloc(BUFFER_SIZE_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!audio_buffer) {
-        ESP_LOGE(TAG, "Failed to allocate audio buffer in PSRAM!");
+    // 2. Allocate Buffer (Dual-Allocation Strategy)
+    uint32_t psram_size = AUDIO_SAMPLE_RATE * 2 * PSRAM_RECORD_SECONDS; // 640kB for 20s
+    uint32_t internal_size = AUDIO_SAMPLE_RATE * 2 * INTERNAL_RECORD_SECONDS; // 160kB for 5s
 
-        // Visual Debugging: PSRAM Error (Red)
-        leds_set_all(0, 0, 0);
-        leds_r[0] = 50; leds_g[0] = 0; leds_b[0] = 0; // Red
-        ws2812_update();
+    ESP_LOGI(TAG, "Attempting PSRAM allocation (Size: %d bytes)...", psram_size);
+    audio_buffer = (int16_t *)heap_caps_malloc(psram_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
-        // Trap in a safe loop to prevent silent task death and keep visual feedback active
-        while(1) {
-            vTaskDelay(pdMS_TO_TICKS(100));
+    if (audio_buffer) {
+        actual_buffer_size_bytes = psram_size;
+        ESP_LOGI(TAG, "SUCCESS: PSRAM Buffer allocated: %d bytes (20s)", actual_buffer_size_bytes);
+    } else {
+        ESP_LOGW(TAG, "WARNING: PSRAM allocation failed! Falling back to Internal RAM (Size: %d bytes)...", internal_size);
+        audio_buffer = (int16_t *)heap_caps_malloc(internal_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+        if (audio_buffer) {
+            actual_buffer_size_bytes = internal_size;
+            ESP_LOGI(TAG, "SUCCESS: Internal RAM Buffer allocated: %d bytes (5s)", actual_buffer_size_bytes);
+        } else {
+            ESP_LOGE(TAG, "CRITICAL: Both PSRAM and Internal RAM allocation failed!");
+
+            // Visual Debugging: Memory Error (Red)
+            leds_set_all(0, 0, 0);
+            leds_r[0] = 50; leds_g[0] = 0; leds_b[0] = 0; // Red
+            ws2812_update();
+
+            // Trap in a safe loop to prevent silent task death and keep visual feedback active
+            while(1) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
         }
     }
 
-    // Clear PSRAM safely after allocation
-    memset(audio_buffer, 0, BUFFER_SIZE_BYTES);
-    ESP_LOGI(TAG, "PSRAM Buffer allocated: %d bytes", BUFFER_SIZE_BYTES);
+    // Clear RAM safely after successful allocation
+    memset(audio_buffer, 0, actual_buffer_size_bytes);
 
     // Visual Debugging: Initial IDLE State (Blue) - Task will take over
     leds_set_all(0, 0, 0);
