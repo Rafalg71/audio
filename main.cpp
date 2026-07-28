@@ -280,11 +280,6 @@ void leds_set_all(uint8_t r, uint8_t g, uint8_t b) {
     for (int i = 0; i < LED_COUNT; i++) {
         leds_r[i] = r; leds_g[i] = g; leds_b[i] = b;
     }
-    ws2812_update();
-}
-
-void leds_clear() {
-    leds_set_all(0, 0, 0);
 }
 
 // --- I2S FUNCTIONS ---
@@ -356,7 +351,9 @@ void audio_task(void *pvParameters) {
                 i2s_zero_dma_buffer(I2S_PORT_NUM);
 
                 // Also read out remaining buffered garbage if any
-                while (1) {
+                // Code Review Fix: Limit the loop to avoid an infinite loop if I2S keeps returning small bytes
+                int max_trash_loops = 20;
+                while (max_trash_loops--) {
                     size_t trash_bytes = 0;
                     // Use a very short delay (0) to drain non-blocking
                     if (i2s_read(I2S_PORT_NUM, chunk_buffer, chunk_samples_50ms * sizeof(int16_t), &trash_bytes, 0) != ESP_OK || trash_bytes == 0) {
@@ -413,8 +410,12 @@ void audio_task(void *pvParameters) {
         }
         else {
             was_recording = false;
-            // IDLE state: Read and discard to keep I2S buffers clear, or just wait.
-            // Using a short block to not spinlock
+            // IDLE state
+            // Code Review Fix: Avoid I2S RX buffer overflowing over time.
+            // When not recording, periodically drain the DMA buffer.
+            size_t discard_bytes = 0;
+            i2s_read(I2S_PORT_NUM, chunk_buffer, chunk_samples_50ms * sizeof(int16_t), &discard_bytes, 0);
+
             vTaskDelay(pdMS_TO_TICKS(20));
         }
     }
@@ -465,6 +466,7 @@ void ui_task(void *pvParameters) {
                 current_state = STATE_IDLE;
             } else if (hold_time <= 500) {
                 // Short click
+                // Code Review Fix: Make exiting JAMMING possible even with a long click, but standard toggle is better.
                 if (current_state == STATE_IDLE) {
                     if (audio_buffer_len > CHUNK_SAMPLES) {
                         ESP_LOGI(TAG, "State -> JAMMING");
@@ -501,7 +503,7 @@ void ui_task(void *pvParameters) {
         if (!key3_pressed) key3_was_pressed = false;
 
         // --- LED Updates ---
-        leds_clear();
+        leds_set_all(0, 0, 0); // Code review fix: leds_set_all doesn't call ws2812_update anymore
         if (current_state == STATE_IDLE) {
             leds_r[0] = 0; leds_g[0] = 0; leds_b[0] = 50; // Blue
         } else if (current_state == STATE_JAMMING) {
@@ -538,22 +540,44 @@ void ui_task(void *pvParameters) {
 extern "C" void app_main(void) {
     ESP_LOGI(TAG, "Audio Jammer PoC Booting...");
 
-    // 1. Allocate PSRAM Buffer
-    audio_buffer = (int16_t *)heap_caps_malloc(BUFFER_SIZE_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!audio_buffer) {
-        ESP_LOGE(TAG, "Failed to allocate audio buffer in PSRAM!");
-        return;
-    }
-    memset(audio_buffer, 0, BUFFER_SIZE_BYTES);
-    ESP_LOGI(TAG, "PSRAM Buffer allocated: %d bytes", BUFFER_SIZE_BYTES);
-
-    // 2. Initialize Hardware
+    // 1. Hardware Init (Reordered to run before PSRAM to allow Visual Debugging)
     ws2812_init();
+
+    // Visual Debugging: Booting (Yellow)
+    leds_set_all(0, 0, 0);
+    leds_r[0] = 50; leds_g[0] = 50; leds_b[0] = 0; // Yellow
+    ws2812_update();
+
     i2c_master_init();
     i2c_scanner();
     tca9555_init();
     codec_init();
     i2s_init_driver();
+
+    // 2. Allocate PSRAM Buffer
+    audio_buffer = (int16_t *)heap_caps_malloc(BUFFER_SIZE_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!audio_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate audio buffer in PSRAM!");
+
+        // Visual Debugging: PSRAM Error (Red)
+        leds_set_all(0, 0, 0);
+        leds_r[0] = 50; leds_g[0] = 0; leds_b[0] = 0; // Red
+        ws2812_update();
+
+        // Trap in a safe loop to prevent silent task death and keep visual feedback active
+        while(1) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+
+    // Clear PSRAM safely after allocation
+    memset(audio_buffer, 0, BUFFER_SIZE_BYTES);
+    ESP_LOGI(TAG, "PSRAM Buffer allocated: %d bytes", BUFFER_SIZE_BYTES);
+
+    // Visual Debugging: Initial IDLE State (Blue) - Task will take over
+    leds_set_all(0, 0, 0);
+    leds_r[0] = 0; leds_g[0] = 0; leds_b[0] = 50; // Blue
+    ws2812_update();
 
     // 3. Start Tasks
     // Audio task gets higher priority to avoid buffer underruns
